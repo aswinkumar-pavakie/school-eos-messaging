@@ -1,0 +1,22 @@
+# Local development infrastructure — Redis ONLY.
+#
+# PostgreSQL is deliberately NOT here: this service connects to the existing,
+# real School EOS Supabase PostgreSQL project (same one school-eos-backend
+# uses), never a local/Docker database. See .env.example's DATABASE_URL comment
+# and README.md's "Database" section for why.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - messaging-redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  messaging-redis-data:
