@@ -41,6 +41,9 @@ function buildService(
 
   const membersRepo = {
     createMembers: jest.fn().mockResolvedValue(undefined),
+    setMlsWelcome: jest.fn().mockResolvedValue(undefined),
+    ackMlsWelcome: jest.fn().mockResolvedValue(undefined),
+    findMembership: jest.fn().mockResolvedValue(null),
   } as unknown as ConversationMembersRepository;
   const requestsRepo = {
     findPendingForConversation: jest
@@ -214,5 +217,76 @@ describe('ConversationsService.createDirect', () => {
         targetPersonId: TARGET,
       }),
     ).rejects.toThrow('connection terminated unexpectedly');
+  });
+
+  it('stores the MLS Welcome on the TARGET (joining) member\'s row, never the creator\'s', async () => {
+    const { service, membersRepo } = buildService({ decision: 'ALLOW_DIRECT' });
+    const welcome = Buffer.from('fake-welcome-bytes');
+    await service.createDirect({
+      actorPersonId: ACTOR,
+      actorRoles: ['PARENT'],
+      targetPersonId: TARGET,
+      mlsWelcome: welcome,
+    });
+    expect(membersRepo.setMlsWelcome).toHaveBeenCalledWith(
+      'new-conv-1',
+      TARGET,
+      welcome,
+      expect.anything(),
+    );
+  });
+
+  it('never calls setMlsWelcome when no Welcome is supplied', async () => {
+    const { service, membersRepo } = buildService({ decision: 'ALLOW_DIRECT' });
+    await service.createDirect({
+      actorPersonId: ACTOR,
+      actorRoles: ['PARENT'],
+      targetPersonId: TARGET,
+    });
+    expect(membersRepo.setMlsWelcome).not.toHaveBeenCalled();
+  });
+});
+
+describe('ConversationsService.getById', () => {
+  it('exposes the callers own pending Welcome, base64-encoded, when not yet delivered', async () => {
+    const { service, conversationsRepo, membersRepo } = buildService();
+    (conversationsRepo as any).findById = jest
+      .fn()
+      .mockResolvedValue({ id: 'conv-1', status: 'ACTIVE' });
+    (membersRepo.findMembership as jest.Mock).mockResolvedValue({
+      conversationId: 'conv-1',
+      personId: TARGET,
+      membershipStatus: 'ACTIVE',
+      lastReadMessageId: null,
+      mlsWelcome: Buffer.from('hello-welcome'),
+      mlsWelcomeDeliveredAt: null,
+    });
+    const result = await service.getById('conv-1', TARGET);
+    expect(result.mlsWelcome).toBe(Buffer.from('hello-welcome').toString('base64'));
+  });
+
+  it('hides the Welcome once it has already been delivered/acked', async () => {
+    const { service, conversationsRepo, membersRepo } = buildService();
+    (conversationsRepo as any).findById = jest
+      .fn()
+      .mockResolvedValue({ id: 'conv-1', status: 'ACTIVE' });
+    (membersRepo.findMembership as jest.Mock).mockResolvedValue({
+      conversationId: 'conv-1',
+      personId: TARGET,
+      membershipStatus: 'ACTIVE',
+      lastReadMessageId: null,
+      mlsWelcome: Buffer.from('hello-welcome'),
+      mlsWelcomeDeliveredAt: '2026-01-01T00:00:00.000Z',
+    });
+    const result = await service.getById('conv-1', TARGET);
+    expect(result.mlsWelcome).toBeNull();
+  });
+});
+
+describe('ConversationsService.ackMlsWelcome', () => {
+  it('delegates to the repository for the calling person and conversation', async () => {
+    const { service, membersRepo } = buildService();
+    await service.ackMlsWelcome('conv-1', TARGET);
+    expect(membersRepo.ackMlsWelcome).toHaveBeenCalledWith('conv-1', TARGET);
   });
 });

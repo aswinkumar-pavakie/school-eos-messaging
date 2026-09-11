@@ -34,4 +34,13 @@ export class CreateRequestDto {
   @ValidateNested()
   @Type(() => InitialMessageDto)
   initialMessage!: InitialMessageDto;
+
+  /** Base64-encoded MLS Welcome for the recipient -- same as
+   * CreateConversationDto's own field; a group must exist the moment the
+   * one allowed pending-request message can be encrypted (see
+   * database/migrations/0002_mls.sql). */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  mlsWelcome?: string;
 }

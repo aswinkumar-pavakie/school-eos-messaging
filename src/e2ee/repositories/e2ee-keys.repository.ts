@@ -32,6 +32,13 @@ export interface OneTimePrekeyRow {
   status: 'AVAILABLE' | 'CONSUMED';
 }
 
+export interface MlsKeyPackageRow {
+  id: string;
+  deviceId: string;
+  keyPackage: string;
+  status: 'AVAILABLE' | 'CONSUMED';
+}
+
 @Injectable()
 export class E2eeKeysRepository {
   constructor(private readonly postgres: PostgresService) {}
@@ -183,6 +190,68 @@ export class E2eeKeysRepository {
   ): Promise<number> {
     const { rows } = await executor.query(
       `SELECT count(*)::int AS count FROM messaging.e2ee_one_time_prekeys WHERE device_id = $1 AND status = 'AVAILABLE'`,
+      [deviceId],
+    );
+    return rows[0].count;
+  }
+
+  /** Publishes a batch of MLS KeyPackages -- same shape as
+   * bulkCreateOneTimePrekeys, but RETURNING the created ids in submission
+   * order: the client must durably map each server-assigned id to its own
+   * local private KeyPackage material, so (unlike a plain prekey) it needs
+   * that id back. */
+  async bulkCreateMlsKeyPackages(
+    deviceId: string,
+    keyPackages: string[],
+    executor: Queryable = this.postgres,
+  ): Promise<string[]> {
+    if (keyPackages.length === 0) return [];
+    const values = keyPackages.map((_, i) => `($1, $${i + 2})`).join(', ');
+    const { rows } = await executor.query(
+      `INSERT INTO messaging.e2ee_mls_key_packages (device_id, key_package) VALUES ${values}
+       RETURNING id`,
+      [deviceId, ...keyPackages],
+    );
+    return rows.map((row) => row.id);
+  }
+
+  /** Atomically claims and consumes ONE available MLS KeyPackage for this
+   * device -- identical concurrency-safety pattern to
+   * consumeOneOneTimePrekey (UPDATE...RETURNING, not SELECT-then-UPDATE).
+   * Returns null if none are left (a real "replenish needed" state). */
+  async consumeOneMlsKeyPackage(
+    deviceId: string,
+    executor: Queryable = this.postgres,
+  ): Promise<MlsKeyPackageRow | null> {
+    const { rows } = await executor.query(
+      `UPDATE messaging.e2ee_mls_key_packages
+       SET status = 'CONSUMED', consumed_at = now()
+       WHERE id = (
+         SELECT id FROM messaging.e2ee_mls_key_packages
+         WHERE device_id = $1 AND status = 'AVAILABLE'
+         ORDER BY created_at ASC
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED
+       )
+       RETURNING id, device_id, key_package, status`,
+      [deviceId],
+    );
+    if (!rows.length) return null;
+    const row = rows[0];
+    return {
+      id: row.id,
+      deviceId: row.device_id,
+      keyPackage: row.key_package,
+      status: row.status,
+    };
+  }
+
+  async countAvailableMlsKeyPackages(
+    deviceId: string,
+    executor: Queryable = this.postgres,
+  ): Promise<number> {
+    const { rows } = await executor.query(
+      `SELECT count(*)::int AS count FROM messaging.e2ee_mls_key_packages WHERE device_id = $1 AND status = 'AVAILABLE'`,
       [deviceId],
     );
     return rows[0].count;

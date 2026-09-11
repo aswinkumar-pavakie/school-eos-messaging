@@ -80,6 +80,7 @@ export class ConversationsController {
       actorPersonId: actor.personId,
       actorRoles: actor.roles,
       targetPersonId: dto.targetPersonId,
+      mlsWelcome: dto.mlsWelcome ? decodeCiphertext(dto.mlsWelcome) : undefined,
       initialMessage: dto.initialMessage
         ? {
             clientMessageId: dto.initialMessage.clientMessageId,
@@ -102,6 +103,22 @@ export class ConversationsController {
       actor.personId,
     );
     return { data: conversation };
+  }
+
+  /** Retry-safe by design -- call ONLY after joinGroup() succeeded AND the
+   * resulting MLS group state was durably persisted locally. Until this is
+   * called, GET /conversations and GET /conversations/:id keep returning the
+   * same mlsWelcome on every request -- a crash/network failure between
+   * fetch and ack simply means the next attempt re-fetches the identical
+   * Welcome, never lost, never destructively consumed on a plain read. */
+  @Post(':id/mls-welcome/ack')
+  @HttpCode(HttpStatus.OK)
+  async ackMlsWelcome(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentActor() actor: AuthenticatedUser,
+  ) {
+    await this.conversationsService.ackMlsWelcome(id, actor.personId);
+    return { data: { acknowledged: true } };
   }
 }
 

@@ -71,6 +71,7 @@ export class RequestsController {
       actorPersonId: actor.personId,
       actorRoles: actor.roles,
       targetPersonId: dto.targetPersonId,
+      mlsWelcome: dto.mlsWelcome ? decodeCiphertext(dto.mlsWelcome) : undefined,
       initialMessage: {
         clientMessageId: dto.initialMessage.clientMessageId,
         ciphertext: decodeCiphertext(dto.initialMessage.ciphertext),

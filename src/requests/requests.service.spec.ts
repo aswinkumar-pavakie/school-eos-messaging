@@ -52,6 +52,114 @@ function buildService(pendingRequest: any) {
   return { service, requestsRepo, outboxRepo };
 }
 
+/** Separate, minimal builder for createRequest -- a materially different mock
+ * shape than accept/decline/cancel's buildService above (needs
+ * conversationsRepo.create/findActiveBetween, membersRepo.createMembers/
+ * setMlsWelcome, requestsRepo.create/setInitialMessage), so it gets its own
+ * helper rather than overloading the narrower one. */
+function buildServiceForCreate(decision: 'ALLOW_DIRECT' | 'REQUIRE_REQUEST') {
+  const authorization = {
+    authorizeMessaging: jest.fn().mockResolvedValue(decision),
+  } as unknown as AuthorizationService;
+  const conversationsRepo = {
+    findActiveBetween: jest.fn().mockResolvedValue(null),
+    create: jest.fn().mockResolvedValue({ id: 'new-conv-1', status: 'ACTIVE' }),
+    allocateNextSequence: jest.fn().mockResolvedValue(1),
+    updateLastMessage: jest.fn().mockResolvedValue(undefined),
+  } as unknown as ConversationsRepository;
+  const membersRepo = {
+    createMembers: jest.fn().mockResolvedValue(undefined),
+    setMlsWelcome: jest.fn().mockResolvedValue(undefined),
+  } as unknown as ConversationMembersRepository;
+  const requestsRepo = {
+    create: jest.fn().mockResolvedValue({ id: 'req-1' }),
+    setInitialMessage: jest.fn().mockResolvedValue(undefined),
+  } as unknown as ConversationRequestsRepository;
+  const messagesRepo = {
+    insert: jest.fn().mockResolvedValue({
+      id: 'msg-1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }),
+  } as unknown as MessagesRepository;
+  const deliveryRepo = {
+    create: jest.fn().mockResolvedValue(undefined),
+  } as unknown as MessageDeliveryRepository;
+  const outboxRepo = {
+    enqueue: jest.fn().mockResolvedValue(undefined),
+  } as unknown as OutboxEventsRepository;
+  const unitOfWork = {
+    run: jest.fn((work: (client: unknown) => Promise<unknown>) => work({})),
+  } as unknown as UnitOfWork;
+
+  const service = new RequestsService(
+    authorization,
+    conversationsRepo,
+    membersRepo,
+    requestsRepo,
+    messagesRepo,
+    deliveryRepo,
+    outboxRepo,
+    unitOfWork,
+  );
+  return { service, membersRepo };
+}
+
+const INITIAL_MESSAGE = {
+  clientMessageId: 'client-msg-1',
+  ciphertext: Buffer.from('opaque-ciphertext'),
+  encryptionVersion: 'e2ee-mls-v1',
+  encryptionHeader: {},
+};
+
+describe('RequestsService.createRequest', () => {
+  it('stores the MLS Welcome on the recipients row for a REQUIRE_REQUEST (PENDING) path', async () => {
+    const { service, membersRepo } = buildServiceForCreate('REQUIRE_REQUEST');
+    const welcome = Buffer.from('fake-welcome-bytes');
+    await service.createRequest({
+      actorPersonId: REQUESTER,
+      actorRoles: ['PARENT'],
+      targetPersonId: RECIPIENT,
+      mlsWelcome: welcome,
+      initialMessage: INITIAL_MESSAGE,
+    });
+    expect(membersRepo.setMlsWelcome).toHaveBeenCalledWith(
+      'new-conv-1',
+      RECIPIENT,
+      welcome,
+      expect.anything(),
+    );
+  });
+
+  it('stores the MLS Welcome on the recipients row for an ALLOW_DIRECT path too', async () => {
+    const { service, membersRepo } = buildServiceForCreate('ALLOW_DIRECT');
+    const welcome = Buffer.from('fake-welcome-bytes');
+    await service.createRequest({
+      actorPersonId: REQUESTER,
+      actorRoles: ['PARENT'],
+      targetPersonId: RECIPIENT,
+      mlsWelcome: welcome,
+      initialMessage: INITIAL_MESSAGE,
+    });
+    expect(membersRepo.setMlsWelcome).toHaveBeenCalledWith(
+      'new-conv-1',
+      RECIPIENT,
+      welcome,
+      expect.anything(),
+    );
+  });
+
+  it('never calls setMlsWelcome when no Welcome is supplied', async () => {
+    const { service, membersRepo } = buildServiceForCreate('REQUIRE_REQUEST');
+    await service.createRequest({
+      actorPersonId: REQUESTER,
+      actorRoles: ['PARENT'],
+      targetPersonId: RECIPIENT,
+      initialMessage: INITIAL_MESSAGE,
+    });
+    expect(membersRepo.setMlsWelcome).not.toHaveBeenCalled();
+  });
+});
+
 const PENDING = {
   id: 'req-1',
   conversationId: 'conv-1',

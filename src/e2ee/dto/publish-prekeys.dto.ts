@@ -44,3 +44,14 @@ export class PublishPrekeysDto {
   @IsString({ each: true })
   oneTimePrekeys?: string[];
 }
+
+export class PublishMlsKeyPackagesDto {
+  @IsUUID()
+  deviceId!: string;
+
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  @MinLength(1, { each: true })
+  keyPackages!: string[];
+}

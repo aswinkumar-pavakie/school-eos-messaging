@@ -27,9 +27,11 @@ export interface DeviceKeyBundle {
   algorithm: string;
   signedPrekey: { publicKey: string; signature: string } | null;
   oneTimePrekey: string | null;
+  mlsKeyPackage: { id: string; data: string } | null;
 }
 
 const MAX_ONE_TIME_PREKEYS_PER_BATCH = 200;
+const MAX_MLS_KEY_PACKAGES_PER_BATCH = 200;
 
 @Injectable()
 export class E2eeService {
@@ -106,6 +108,32 @@ export class E2eeService {
     }
   }
 
+  /** Publishes a batch of MLS KeyPackages (MLS's own equivalent of a prekey
+   * bundle) for this device -- same ownership check as publish() above, same
+   * device-must-be-ACTIVE gate. Returns the created ids in submission order
+   * so the client can map each one to its own local private KeyPackage
+   * material. */
+  async publishMlsKeyPackages(
+    actorPersonId: string,
+    deviceId: string,
+    keyPackages: string[],
+  ): Promise<string[]> {
+    const device = await this.devicesRepo.findById(deviceId);
+    if (!device || device.personId !== actorPersonId) {
+      throw new ForbiddenException({ code: MESSAGING_ERRORS.ACCESS_DENIED });
+    }
+    if (device.status !== 'ACTIVE') {
+      throw new ForbiddenException({ code: MESSAGING_ERRORS.DEVICE_REVOKED });
+    }
+    if (keyPackages.length > MAX_MLS_KEY_PACKAGES_PER_BATCH) {
+      throw new BadRequestException({
+        code: MESSAGING_ERRORS.INVALID_PROTOCOL,
+        message: 'Too many MLS KeyPackages in one batch.',
+      });
+    }
+    return this.keysRepo.bulkCreateMlsKeyPackages(deviceId, keyPackages);
+  }
+
   /** The prekey bundle a sender fetches before establishing a new E2EE
    * session (LLD §47). Gated by the SAME authorization decision as sending
    * that person a message at all -- DENY here means no key material leaks to
@@ -146,6 +174,9 @@ export class E2eeService {
       const oneTimePrekey = await this.keysRepo.consumeOneOneTimePrekey(
         device.id,
       );
+      const mlsKeyPackage = await this.keysRepo.consumeOneMlsKeyPackage(
+        device.id,
+      );
       bundles.push({
         deviceId: device.id,
         identityPublicKey: identityKey.identityPublicKey,
@@ -157,6 +188,9 @@ export class E2eeService {
             }
           : null,
         oneTimePrekey: oneTimePrekey?.publicKey ?? null,
+        mlsKeyPackage: mlsKeyPackage
+          ? { id: mlsKeyPackage.id, data: mlsKeyPackage.keyPackage }
+          : null,
       });
     }
     return bundles;

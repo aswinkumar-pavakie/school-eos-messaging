@@ -38,4 +38,12 @@ export class CreateConversationDto {
   @ValidateNested()
   @Type(() => InitialMessageDto)
   initialMessage?: InitialMessageDto;
+
+  /** Base64-encoded MLS Welcome for the target (joining) member -- independent
+   * of initialMessage; a group must exist the moment ANY messaging can happen
+   * in this conversation (see database/migrations/0002_mls.sql). */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  mlsWelcome?: string;
 }

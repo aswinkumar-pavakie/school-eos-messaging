@@ -39,6 +39,11 @@ export interface CreateDirectConversationInput {
   actorPersonId: string;
   actorRoles: string[];
   targetPersonId: string;
+  /** Base64-decoded MLS Welcome for the target (joining) member -- independent
+   * of initialMessage, since a group must exist the moment ANY messaging can
+   * happen in this conversation, whether or not this call also carries a
+   * chat message (see database/migrations/0002_mls.sql). */
+  mlsWelcome?: Buffer;
   initialMessage?: {
     clientMessageId: string;
     ciphertext: Buffer;
@@ -107,6 +112,14 @@ export class ConversationsService {
           [input.actorPersonId, input.targetPersonId],
           client,
         );
+        if (input.mlsWelcome) {
+          await this.membersRepo.setMlsWelcome(
+            created.id,
+            input.targetPersonId,
+            input.mlsWelcome,
+            client,
+          );
+        }
         if (input.initialMessage) {
           await insertFirstMessage(
             {
@@ -147,7 +160,9 @@ export class ConversationsService {
   async getById(
     conversationId: string,
     personId: string,
-  ): Promise<ConversationRow & { ownLastReadSequence: number }> {
+  ): Promise<
+    ConversationRow & { ownLastReadSequence: number; mlsWelcome: string | null }
+  > {
     const conversation = await this.conversationsRepo.findById(conversationId);
     const membership = conversation
       ? await this.membersRepo.findMembership(conversationId, personId)
@@ -167,7 +182,21 @@ export class ConversationsService {
         code: MESSAGING_ERRORS.CONVERSATION_NOT_FOUND,
       });
     }
-    return { ...conversation, ownLastReadSequence: 0 };
+    const mlsWelcome =
+      membership && !membership.mlsWelcomeDeliveredAt && membership.mlsWelcome
+        ? membership.mlsWelcome.toString('base64')
+        : null;
+    return { ...conversation, ownLastReadSequence: 0, mlsWelcome };
+  }
+
+  /** Marks the caller's own pending Welcome for this conversation as
+   * delivered -- called ONLY after the client's joinGroup() succeeded AND
+   * the resulting state was durably persisted locally (never merely after a
+   * fetch). Idempotent, and silently a no-op for a non-member/non-existent
+   * conversation (matches this service's own 404-not-403 posture -- no
+   * separate error path needed for "there was nothing to ack"). */
+  async ackMlsWelcome(conversationId: string, personId: string): Promise<void> {
+    await this.membersRepo.ackMlsWelcome(conversationId, personId);
   }
 
   async list(

@@ -23,6 +23,11 @@ export interface ConversationRow {
   createdAt: string;
   updatedAt: string;
   version: number;
+  /** Present only on actor-scoped queries (listForPerson) -- the calling
+   * person's own pending MLS Welcome for this conversation, base64-encoded,
+   * or null if none/already delivered. Undefined (not present at all) on
+   * queries with no actor context (findById, findActiveBetween, etc). */
+  mlsWelcome?: string | null;
 }
 
 function mapRow(row: any): ConversationRow {
@@ -40,6 +45,16 @@ function mapRow(row: any): ConversationRow {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     version: Number(row.version),
+  };
+}
+
+function mapRowWithMlsWelcome(row: any): ConversationRow {
+  return {
+    ...mapRow(row),
+    mlsWelcome:
+      row.mls_welcome_delivered_at === null && row.mls_welcome !== null
+        ? Buffer.from(row.mls_welcome).toString('base64')
+        : null,
   };
 }
 
@@ -164,7 +179,7 @@ export class ConversationsRepository {
     }
     values.push(params.limit);
     const { rows } = await executor.query(
-      `SELECT ${QUALIFIED_COLUMNS}
+      `SELECT ${QUALIFIED_COLUMNS}, cm.mls_welcome, cm.mls_welcome_delivered_at
        FROM messaging.conversations c
        JOIN messaging.conversation_members cm ON cm.conversation_id = c.id AND cm.membership_status = 'ACTIVE'
        WHERE ${conditions.join(' AND ')}
@@ -172,7 +187,7 @@ export class ConversationsRepository {
        LIMIT $${values.length}`,
       values,
     );
-    return rows.map(mapRow);
+    return rows.map(mapRowWithMlsWelcome);
   }
 
   /** Batched "does a non-CLOSED conversation already exist with each of these

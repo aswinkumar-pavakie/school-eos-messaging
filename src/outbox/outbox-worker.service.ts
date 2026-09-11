@@ -155,11 +155,15 @@ export class OutboxWorkerService {
       senderPersonId: payload.senderPersonId,
     });
 
-    await this.notifyIfOffline(payload.recipientPersonId, payload.senderPersonId, {
-      title: 'New message',
-      bodyTemplate: (name) => `${name} sent you a message`,
-      data: { type: 'message.new', conversationId: payload.conversationId },
-    });
+    await this.notifyIfOffline(
+      payload.recipientPersonId,
+      payload.senderPersonId,
+      {
+        title: 'New message',
+        bodyTemplate: (name) => `${name} sent you a message`,
+        data: { type: 'message.new', conversationId: payload.conversationId },
+      },
+    );
   }
 
   /** The recipient of a brand-new request -- LLD §16's own request flow
@@ -175,11 +179,19 @@ export class OutboxWorkerService {
       requesterPersonId: payload.requesterPersonId,
     });
 
-    await this.notifyIfOffline(payload.recipientPersonId, payload.requesterPersonId, {
-      title: 'New message request',
-      bodyTemplate: (name) => `${name} wants to send you a message`,
-      data: { type: 'request.new', conversationId: payload.conversationId, requestId: payload.requestId },
-    });
+    await this.notifyIfOffline(
+      payload.recipientPersonId,
+      payload.requesterPersonId,
+      {
+        title: 'New message request',
+        bodyTemplate: (name) => `${name} wants to send you a message`,
+        data: {
+          type: 'request.new',
+          conversationId: payload.conversationId,
+          requestId: payload.requestId,
+        },
+      },
+    );
   }
 
   /** Notifies the ORIGINAL REQUESTER once their request has been decided --
@@ -199,15 +211,27 @@ export class OutboxWorkerService {
     await this.notifyIfOffline(payload.requesterPersonId, null, {
       title: accepted ? 'Request accepted' : 'Request declined',
       bodyTemplate: () =>
-        accepted ? 'Your message request was accepted.' : 'Your message request was declined.',
-      data: { type: eventName, conversationId: payload.conversationId, requestId: payload.requestId },
+        accepted
+          ? 'Your message request was accepted.'
+          : 'Your message request was declined.',
+      data: {
+        type: eventName,
+        conversationId: payload.conversationId,
+        requestId: payload.requestId,
+      },
     });
   }
 
   /** Cross-instance realtime fan-out -- whichever instance holds this
    * person's live WebSocket connection (if any) forwards the event. */
-  private async publish(targetPersonId: string, event: Record<string, unknown>): Promise<void> {
-    await this.redis.client.publish(`ws:user:${targetPersonId}`, JSON.stringify(event));
+  private async publish(
+    targetPersonId: string,
+    event: Record<string, unknown>,
+  ): Promise<void> {
+    await this.redis.client.publish(
+      `ws:user:${targetPersonId}`,
+      JSON.stringify(event),
+    );
   }
 
   /** Shared by every event type: push only if the target is genuinely
@@ -218,7 +242,11 @@ export class OutboxWorkerService {
   private async notifyIfOffline(
     targetPersonId: string,
     otherPersonId: string | null,
-    push: { title: string; bodyTemplate: (otherDisplayName: string) => string; data: Record<string, unknown> },
+    push: {
+      title: string;
+      bodyTemplate: (otherDisplayName: string) => string;
+      data: Record<string, unknown>;
+    },
   ): Promise<void> {
     const online = await this.presence.isOnline(targetPersonId);
     if (online) return;

@@ -40,6 +40,9 @@ export interface CreateRequestInput {
   actorPersonId: string;
   actorRoles: string[];
   targetPersonId: string;
+  /** Base64-decoded MLS Welcome for the recipient -- see
+   * ConversationsService's own CreateDirectConversationInput.mlsWelcome. */
+  mlsWelcome?: Buffer;
   initialMessage: {
     clientMessageId: string;
     ciphertext: Buffer;
@@ -104,6 +107,14 @@ export class RequestsService {
             [input.actorPersonId, input.targetPersonId],
             client,
           );
+          if (input.mlsWelcome) {
+            await this.membersRepo.setMlsWelcome(
+              created.id,
+              input.targetPersonId,
+              input.mlsWelcome,
+              client,
+            );
+          }
           await insertFirstMessage(
             {
               conversationsRepo: this.conversationsRepo,
@@ -140,6 +151,14 @@ export class RequestsService {
           [input.actorPersonId, input.targetPersonId],
           client,
         );
+        if (input.mlsWelcome) {
+          await this.membersRepo.setMlsWelcome(
+            created.id,
+            input.targetPersonId,
+            input.mlsWelcome,
+            client,
+          );
+        }
         const request = await this.requestsRepo.create(
           {
             conversationId: created.id,
