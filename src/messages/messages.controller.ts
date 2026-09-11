@@ -10,6 +10,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import { IsInt, Min } from 'class-validator';
 import { AuthenticatedUser } from '../auth/authenticated-user.interface';
 import { CurrentActor } from '../auth/current-actor.decorator';
 import { MESSAGING_ERRORS } from '../common/errors/error-codes';
@@ -28,6 +29,14 @@ import { MessagesService } from './messages.service';
 const MESSAGE_SEND_LIMIT_PER_MINUTE = 60; // LLD §34/§38.
 
 class MarkReadDto {
+  // Confirmed live: with no validation decorator here, the global
+  // ValidationPipe's whitelist (forbidNonWhitelisted: true) treated
+  // `sequence` as an unrecognized property and rejected every real request
+  // with 400 "property sequence should not exist" -- this class needs the
+  // same real decorators every other DTO in this service has, not just a
+  // plain TypeScript type annotation (which class-validator never sees).
+  @IsInt()
+  @Min(0)
   sequence!: number;
 }
 
