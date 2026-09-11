@@ -37,6 +37,19 @@ interface MessageCreatedPayload {
   recipientPersonId: string;
 }
 
+interface RequestCreatedPayload {
+  conversationId: string;
+  requestId: string;
+  recipientPersonId: string;
+  requesterPersonId: string;
+}
+
+interface RequestDecidedPayload {
+  conversationId: string;
+  requestId: string;
+  requesterPersonId: string;
+}
+
 @Injectable()
 export class OutboxWorkerService {
   private readonly logger = new Logger(OutboxWorkerService.name);
@@ -97,63 +110,141 @@ export class OutboxWorkerService {
   }
 
   private async processEvent(event: OutboxEventRow): Promise<void> {
-    if (event.eventType === 'message.created') {
-      await this.processMessageCreated(
-        event.payload as unknown as MessageCreatedPayload,
-      );
-      return;
+    switch (event.eventType) {
+      case 'message.created':
+        return this.processMessageCreated(
+          event.payload as unknown as MessageCreatedPayload,
+        );
+      case 'request.created':
+        return this.processRequestCreated(
+          event.payload as unknown as RequestCreatedPayload,
+        );
+      case 'request.accepted':
+        return this.processRequestDecided(
+          event.payload as unknown as RequestDecidedPayload,
+          'request.accepted',
+        );
+      case 'request.declined':
+        return this.processRequestDecided(
+          event.payload as unknown as RequestDecidedPayload,
+          'request.declined',
+        );
+      default:
+        // A genuinely new event type nobody wired a handler for yet is a
+        // real bug surfaced via markFailed, not a silent no-op -- confirmed
+        // live: request.created/request.accepted were enqueued by
+        // RequestsService from the very first build but this switch never
+        // actually grew a branch for them, so real recipients got zero
+        // realtime/push notification for a new or decided request until
+        // this was caught by reading the service's own live logs.
+        throw new Error(`Unrecognized outbox event type: ${event.eventType}`);
     }
-    // Future event types (request.created, request.accepted, etc.) get their
-    // own branch here — never silently ignored, so an unrecognized event
-    // type is a real bug surfaced via markFailed, not a silent no-op.
-    throw new Error(`Unrecognized outbox event type: ${event.eventType}`);
   }
 
   private async processMessageCreated(
     payload: MessageCreatedPayload,
   ): Promise<void> {
-    // 1. Always publish for cross-instance realtime fan-out (LLD §29/§43) --
-    //    whichever WebSocket-gateway instance actually holds this recipient's
-    //    live connection (if any) picks this up and forwards message.new.
-    await this.redis.client.publish(
-      `ws:user:${payload.recipientPersonId}`,
-      JSON.stringify({
-        type: 'message.new',
-        conversationId: payload.conversationId,
-        messageId: payload.messageId,
-        sequenceNo: payload.sequenceNo,
-        senderPersonId: payload.senderPersonId,
-      }),
-    );
+    // Always publish for cross-instance realtime fan-out (LLD §29/§43) --
+    // whichever WebSocket-gateway instance actually holds this recipient's
+    // live connection (if any) picks this up and forwards message.new.
+    await this.publish(payload.recipientPersonId, {
+      type: 'message.new',
+      conversationId: payload.conversationId,
+      messageId: payload.messageId,
+      sequenceNo: payload.sequenceNo,
+      senderPersonId: payload.senderPersonId,
+    });
 
-    // 2. Push only if genuinely offline right now (LLD §51: "check recipient
-    //    online? YES -> realtime only, NO -> push notification").
-    const online = await this.presence.isOnline(payload.recipientPersonId);
+    await this.notifyIfOffline(payload.recipientPersonId, payload.senderPersonId, {
+      title: 'New message',
+      bodyTemplate: (name) => `${name} sent you a message`,
+      data: { type: 'message.new', conversationId: payload.conversationId },
+    });
+  }
+
+  /** The recipient of a brand-new request -- LLD §16's own request flow
+   * literally cannot be acted on if the recipient never learns it exists;
+   * this is the "someone wants to message you" notification. */
+  private async processRequestCreated(
+    payload: RequestCreatedPayload,
+  ): Promise<void> {
+    await this.publish(payload.recipientPersonId, {
+      type: 'request.new',
+      conversationId: payload.conversationId,
+      requestId: payload.requestId,
+      requesterPersonId: payload.requesterPersonId,
+    });
+
+    await this.notifyIfOffline(payload.recipientPersonId, payload.requesterPersonId, {
+      title: 'New message request',
+      bodyTemplate: (name) => `${name} wants to send you a message`,
+      data: { type: 'request.new', conversationId: payload.conversationId, requestId: payload.requestId },
+    });
+  }
+
+  /** Notifies the ORIGINAL REQUESTER once their request has been decided --
+   * without this, the person who reached out never learns whether they were
+   * accepted or declined except by manually checking again. */
+  private async processRequestDecided(
+    payload: RequestDecidedPayload,
+    eventName: 'request.accepted' | 'request.declined',
+  ): Promise<void> {
+    await this.publish(payload.requesterPersonId, {
+      type: eventName,
+      conversationId: payload.conversationId,
+      requestId: payload.requestId,
+    });
+
+    const accepted = eventName === 'request.accepted';
+    await this.notifyIfOffline(payload.requesterPersonId, null, {
+      title: accepted ? 'Request accepted' : 'Request declined',
+      bodyTemplate: () =>
+        accepted ? 'Your message request was accepted.' : 'Your message request was declined.',
+      data: { type: eventName, conversationId: payload.conversationId, requestId: payload.requestId },
+    });
+  }
+
+  /** Cross-instance realtime fan-out -- whichever instance holds this
+   * person's live WebSocket connection (if any) forwards the event. */
+  private async publish(targetPersonId: string, event: Record<string, unknown>): Promise<void> {
+    await this.redis.client.publish(`ws:user:${targetPersonId}`, JSON.stringify(event));
+  }
+
+  /** Shared by every event type: push only if the target is genuinely
+   * offline right now (LLD §51), generic content only (this service never
+   * has plaintext to leak even if it wanted to). `otherPersonId` is who to
+   * name in the push body (the message sender, the requester) -- null when
+   * the event isn't "from" anyone in particular (a request decision). */
+  private async notifyIfOffline(
+    targetPersonId: string,
+    otherPersonId: string | null,
+    push: { title: string; bodyTemplate: (otherDisplayName: string) => string; data: Record<string, unknown> },
+  ): Promise<void> {
+    const online = await this.presence.isOnline(targetPersonId);
     if (online) return;
 
-    const tokens = await this.core.getPushTokens(payload.recipientPersonId);
+    const tokens = await this.core.getPushTokens(targetPersonId);
     const validTokens = tokens.filter(isPlausibleExpoPushToken);
     if (validTokens.length === 0) return;
 
-    const sender = await this.core.getUserProjection(payload.senderPersonId);
-    const senderName = sender?.displayName ?? 'Someone';
+    let otherName = 'Someone';
+    if (otherPersonId) {
+      const other = await this.core.getUserProjection(otherPersonId);
+      otherName = other?.displayName ?? 'Someone';
+    }
 
     for (const token of validTokens) {
       try {
-        // Generic content only (LLD §51) -- this service never has plaintext
-        // to include even if it wanted to (E2EE), but the sender's own name
-        // is still safe, non-content metadata (the same convention real
-        // E2EE messengers like Signal use).
         await sendExpoPush({
           to: token,
-          title: 'New message',
-          body: `${senderName} sent you a message`,
-          data: { type: 'message.new', conversationId: payload.conversationId },
+          title: push.title,
+          body: push.bodyTemplate(otherName),
+          data: push.data,
           sound: 'default',
         });
       } catch (err) {
         this.logger.error(
-          `Push notification failed for ${payload.recipientPersonId}: ${err instanceof Error ? err.message : err}`,
+          `Push notification failed for ${targetPersonId}: ${err instanceof Error ? err.message : err}`,
         );
         // One failed token must never abort delivery to the person's other
         // devices — continue the loop rather than rethrow.

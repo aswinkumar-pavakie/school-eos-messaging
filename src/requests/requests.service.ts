@@ -175,6 +175,7 @@ export class RequestsService {
               conversationId: created.id,
               requestId: request.id,
               recipientPersonId: input.targetPersonId,
+              requesterPersonId: input.actorPersonId,
             },
           },
           client,
