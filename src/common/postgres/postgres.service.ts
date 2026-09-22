@@ -37,9 +37,22 @@ export class PostgresService implements OnModuleDestroy, Queryable {
       // query) indefinitely instead of failing fast, which is exactly the
       // "never let a dependency check hang the request" failure mode LLD §40/
       // §57 warns about.
-      connectionTimeoutMillis: 5_000,
+      // Raised from 10 -- confirmed live as the real cause of a system-wide
+      // slowdown (basic listConversations/listRequests calls taking 16-34
+      // SECONDS, discoverUsersAction eventually 500ing with no error code):
+      // this service's own advisory-lock transaction in devices.service.ts's
+      // register() holds one connection for its full duration, and with
+      // useE2eeBootstrap now wired into every role's shell (so it fires on
+      // every dashboard load, not just Messages), real concurrent traffic
+      // across many roles was queuing on a 10-connection pool shared by
+      // every endpoint this service has -- one slow/contended path
+      // (registration) was starving all the others. Same fix, same
+      // reasoning, as school-eos-backend's own postgres.service.ts pool
+      // raise earlier this session -- not a guess, the identical anti-
+      // pattern in the sibling service.
+      connectionTimeoutMillis: 10_000,
       idleTimeoutMillis: 30_000,
-      max: 10,
+      max: 25,
     });
 
     // pg's own documented gotcha: an IDLE pooled client can have its connection
@@ -65,6 +78,32 @@ export class PostgresService implements OnModuleDestroy, Queryable {
 
   connect(): Promise<PoolClient> {
     return this.pool.connect();
+  }
+
+  /** Runs `fn` inside a single BEGIN/COMMIT transaction on one dedicated
+   * client, rolling back on any thrown error. Needed wherever a
+   * read-then-write sequence (e.g. "revoke every prior row, then insert a
+   * new one") must be atomic across concurrent callers -- pool.query() alone
+   * runs each statement on a fresh/arbitrary connection with no isolation
+   * between them, so two overlapping calls can each read the same
+   * pre-write state and both proceed, which is exactly how
+   * devices.service.ts's register() ended up leaving more than one row
+   * ACTIVE for the same person (confirmed live via a direct DB check: six
+   * real people had 2-8 simultaneously ACTIVE devices, which the single-
+   * active-device V1 design treats as impossible). */
+  async withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   /** Read-only health check — used by /health/ready, never anything else. */
