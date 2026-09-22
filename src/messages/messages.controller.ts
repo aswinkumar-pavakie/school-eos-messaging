@@ -144,6 +144,7 @@ function toMessageResponse(message: {
   id: string;
   conversationId: string;
   senderPersonId: string;
+  clientMessageId: string;
   sequenceNo: number;
   ciphertext: Buffer;
   encryptionVersion: string;
@@ -154,6 +155,13 @@ function toMessageResponse(message: {
     id: message.id,
     conversationId: message.conversationId,
     senderPersonId: message.senderPersonId,
+    // The sender already knows this value (they generated it before
+    // sending) -- exposing it here lets the sender's own client recognize
+    // "this is one of mine" and show its locally-cached plaintext instead
+    // of attempting to decrypt its own ciphertext, which a real
+    // forward-secret scheme structurally cannot do once the message has
+    // already been sent (see cipher.ts on the mobile side).
+    clientMessageId: message.clientMessageId,
     sequence: message.sequenceNo,
     ciphertext: message.ciphertext.toString('base64'),
     encryptionVersion: message.encryptionVersion,

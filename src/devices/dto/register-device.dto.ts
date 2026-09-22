@@ -9,8 +9,8 @@ export class RegisterDeviceDto {
   @MinLength(1)
   devicePublicKey!: string;
 
-  @IsIn(['ANDROID', 'IOS'])
-  platform!: 'ANDROID' | 'IOS';
+  @IsIn(['ANDROID', 'IOS', 'WEB'])
+  platform!: 'ANDROID' | 'IOS' | 'WEB';
 
   @IsOptional()
   @IsString()

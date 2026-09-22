@@ -23,7 +23,14 @@ import {
   ListMessagingUsersResult,
 } from './core-integration.types';
 
-const REQUEST_TIMEOUT_MS = 5_000;
+// 45s, not 5s -- Core (school-eos-backend) runs on Render's free tier, which
+// sleeps when idle and can take 30-60s to wake on the first request after a
+// while (same documented fact as the website/mobile .env comments for this
+// service's own cold start). A 5s abort meant EVERY call made during Core's
+// wake-up window failed with "This operation was aborted", surfacing as a
+// generic 500 on discovery/authorization/outbox delivery -- confirmed live
+// via Render logs (a burst of aborted GET /users/:id calls, not 401s/404s).
+const REQUEST_TIMEOUT_MS = 45_000;
 const CACHE_TTL_MS = 5_000;
 
 interface CacheEntry<T> {
@@ -83,6 +90,40 @@ export class CoreIntegrationService {
     });
   }
 
+  /** Batched counterpart to getUserProjection -- ONE (or a few, chunked)
+   * request instead of firing getUserProjection once per id. Directory
+   * discovery's scoped-contacts resolution can need hundreds of these at
+   * once (e.g. a Class Advisor's full section roster); doing that as N
+   * parallel single-id calls was exhausting Core's DB connection pool and
+   * crashing with a 500 under exactly that load. Not run through the
+   * single-id cache (a batch is already one request), but each result is
+   * also written into it so a subsequent single-id lookup for the same
+   * person within the TTL is still a cache hit. */
+  async getUserProjectionsBatch(
+    personIds: string[],
+  ): Promise<Map<string, CoreUserProjection>> {
+    const result = new Map<string, CoreUserProjection>();
+    if (personIds.length === 0) return result;
+
+    const CHUNK_SIZE = 200;
+    for (let i = 0; i < personIds.length; i += CHUNK_SIZE) {
+      const chunk = personIds.slice(i, i + CHUNK_SIZE);
+      const body = await this.post<{ data: CoreUserProjection[] }>(
+        '/users/batch',
+        { personIds: chunk },
+      );
+      const now = Date.now();
+      for (const projection of body.data) {
+        result.set(projection.personId, projection);
+        this.cache.set(`user:${projection.personId}`, {
+          value: projection,
+          expiresAt: now + CACHE_TTL_MS,
+        });
+      }
+    }
+    return result;
+  }
+
   async listMessagingUsers(params: {
     cursor?: string;
     limit: number;
@@ -124,12 +165,28 @@ export class CoreIntegrationService {
   }
 
   private async get<T>(path: string): Promise<T> {
+    return this.request<T>('GET', path);
+  }
+
+  private async post<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>('POST', path, body);
+  }
+
+  private async request<T>(
+    method: 'GET' | 'POST',
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
-        method: 'GET',
-        headers: { 'X-Internal-Service-Key': this.internalKey },
+        method,
+        headers: {
+          'X-Internal-Service-Key': this.internalKey,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -141,7 +198,7 @@ export class CoreIntegrationService {
       return (await response.json()) as T;
     } catch (err) {
       this.logger.error(
-        `Core integration call failed: GET ${path} — ${err instanceof Error ? err.message : err}`,
+        `Core integration call failed: ${method} ${path} — ${err instanceof Error ? err.message : err}`,
       );
       throw new CoreIntegrationUnavailableError(path, err);
     } finally {

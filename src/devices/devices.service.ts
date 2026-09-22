@@ -24,6 +24,26 @@ export class DevicesService {
     platform: DevicePlatform,
     appVersion?: string,
   ): Promise<DeviceRow> {
+    // V1 scope is explicitly one active messaging device per person (see the
+    // mobile messaging plan's own "one active messaging device per person...
+    // registering a new device revokes the old one's messaging keys"). Without
+    // this, a person who re-registers (e.g. after clearing local app storage,
+    // or switching test accounts on one physical phone) accumulates multiple
+    // ACTIVE rows -- and getKeyBundleForUser/findActiveForPerson would then
+    // hand a message sender an ARBITRARY one of them, including a stale
+    // device whose private key material no longer exists anywhere, making
+    // the resulting group permanently unjoinable by this person on any real
+    // device. Revoking every prior active device before adding the new one
+    // keeps "this person's active device" unambiguous, always.
+    const priorActiveDevices = await this.devicesRepo.findActiveForPerson(personId);
+    for (const prior of priorActiveDevices) {
+      await this.devicesRepo.revoke(prior.id);
+      await this.audit.record('DEVICE_REVOKED', {
+        actorPersonId: personId,
+        deviceId: prior.id,
+      });
+    }
+
     const device = await this.devicesRepo.register({
       personId,
       devicePublicKey,

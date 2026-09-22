@@ -111,6 +111,7 @@ describe('ConversationsService.createDirect', () => {
       conversationId: 'existing-conv',
       state: 'ACTIVE',
       messagingMode: 'DIRECT',
+      isNew: false,
     });
     expect(authorization.authorizeMessaging).not.toHaveBeenCalled();
     expect(conversationsRepo.create).not.toHaveBeenCalled();
@@ -130,6 +131,7 @@ describe('ConversationsService.createDirect', () => {
       conversationId: 'existing-conv',
       state: 'PENDING',
       messagingMode: 'REQUEST',
+      isNew: false,
     });
   });
 
@@ -172,6 +174,7 @@ describe('ConversationsService.createDirect', () => {
       conversationId: 'new-conv-1',
       state: 'ACTIVE',
       messagingMode: 'DIRECT',
+      isNew: true,
     });
     expect(conversationsRepo.create).toHaveBeenCalledWith(
       { personA: ACTOR, personB: TARGET, createdBy: ACTOR },

@@ -9,7 +9,7 @@ import {
 } from '../../common/postgres/postgres.service';
 
 export type DeviceStatus = 'ACTIVE' | 'REVOKED' | 'SUSPENDED';
-export type DevicePlatform = 'ANDROID' | 'IOS';
+export type DevicePlatform = 'ANDROID' | 'IOS' | 'WEB';
 
 export interface DeviceRow {
   id: string;

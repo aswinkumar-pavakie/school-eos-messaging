@@ -56,6 +56,15 @@ export interface CreateConversationResult {
   conversationId: string;
   state: 'ACTIVE' | 'PENDING';
   messagingMode: 'DIRECT' | 'REQUEST';
+  // False whenever this call resolved to an ALREADY-existing conversation
+  // (describeExisting below) -- the caller's mlsWelcome/initialMessage were
+  // never used in that case (an existing conversation already has its own
+  // real group/history), so the client must not treat its own freshly
+  // generated MLS group as authoritative, must not persist it over
+  // whatever local state (or lack of it) already exists for this
+  // conversationId, and must know its typed message was NOT sent so it can
+  // fall back to the normal steady-state send instead of silently losing it.
+  isNew: boolean;
 }
 
 @Injectable()
@@ -141,6 +150,7 @@ export class ConversationsService {
         conversationId: conversation.id,
         state: 'ACTIVE',
         messagingMode: 'DIRECT',
+        isNew: true,
       };
     } catch (err) {
       // LLD §32: a concurrent create for the same pair races on
@@ -221,6 +231,7 @@ export class ConversationsService {
       conversationId: conversation.id,
       state: pending ? 'PENDING' : 'ACTIVE',
       messagingMode: pending ? 'REQUEST' : 'DIRECT',
+      isNew: false,
     };
   }
 }

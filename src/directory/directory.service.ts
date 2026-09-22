@@ -26,6 +26,13 @@ export interface DiscoveryResult {
 
 const DEFAULT_LIMIT = 30;
 
+// Core's own internal /users listing endpoint caps `limit` at 100
+// (list-messaging-users.query.dto.ts's @Max(100)) -- the over-fetch below
+// must never exceed that or Core rejects the request with a 400, which
+// surfaced here as an uncaught 500 for anyone with a large scoped set (e.g.
+// a Class Advisor with a full section roster easily exceeds 100 on its own).
+const CORE_LIST_USERS_MAX_LIMIT = 100;
+
 @Injectable()
 export class DirectoryService {
   constructor(
@@ -51,38 +58,122 @@ export class DirectoryService {
 
     // 1-4. Resolve scoped users first (empty set for Principal/VP -- their
     // scope is unbounded, handled entirely by the "remaining" bucket below).
+    // Sorted deterministically by personId so this list can be paginated
+    // across calls the same way Core's own keyset pagination works below --
+    // it's recomputed fresh on every call (not cached across a "session"),
+    // same tradeoff the original single-page version already accepted.
     const scopeIds = isPrincipalLike
       ? new Set<string>()
       : await this.relationships.getDirectScope(actor.personId, actor.roles);
-    const scopedProjections = await Promise.all(
-      [...scopeIds].map((id) => this.core.getUserProjection(id)),
-    );
-    const scopedUsers = scopedProjections.filter(
-      (p): p is CoreUserProjection => p !== null && p.messagingEnabled,
-    );
+    const scopedProjectionsById = await this.core.getUserProjectionsBatch([
+      ...scopeIds,
+    ]);
+    const scopedUsers = [...scopeIds]
+      .map((id) => scopedProjectionsById.get(id) ?? null)
+      .filter((p): p is CoreUserProjection => p !== null && p.messagingEnabled)
+      .sort((a, b) => a.personId.localeCompare(b.personId));
 
-    // 5-6. Remaining messaging-enabled users (paginated at Core), excluding
-    // whoever's already scoped and the actor themselves.
-    const remaining = await this.core.listMessagingUsers({
-      cursor: params.cursor,
-      limit: limit + scopeIds.size, // over-fetch a little to absorb scoped overlap removed below
-      excludePersonId: actor.personId,
-    });
-    const remainingUsers = remaining.items.filter(
-      (u) => !scopeIds.has(u.personId),
-    );
+    // The opaque cursor this method hands back encodes WHICH phase the walk
+    // is in -- "S:<personId>" mid-way through the (locally-paginated) scoped
+    // list, or "C:<coreCursor|''>" once scoped is exhausted and we're
+    // resuming Core's own keyset-paginated "remaining" listing. Mixing these
+    // two ordered sets into one combined-array position (the previous
+    // design) meant a cursor value could be a SCOPED user's id fed back into
+    // Core's `p.id > cursor` filter -- semantically meaningless to Core, and
+    // silently corrupted the walk. Found live: a Class Advisor with a large
+    // section roster (275 scoped ids) searching for a real, valid colleague
+    // who simply wasn't within the first ~200 combined results ever got
+    // "not found" -- of 1,017 real messaging-enabled people, only 184 were
+    // ever reachable via pagination, because the OLD nextCursor was computed
+    // from `combined.length > limit`, which goes false (falsely signalling
+    // "no more data") the instant scope-overlap filtering trims one Core
+    // page below `limit`, even while Core's own real nextCursor says there
+    // is plenty more.
+    let scopedCursor: string | null = null;
+    let coreCursor: string | undefined;
+    let phase: 'scoped' | 'core' = scopedUsers.length > 0 ? 'scoped' : 'core';
+    if (params.cursor?.startsWith('S:')) {
+      phase = 'scoped';
+      scopedCursor = params.cursor.slice(2);
+    } else if (params.cursor?.startsWith('C:')) {
+      phase = 'core';
+      coreCursor = params.cursor.slice(2) || undefined;
+    }
 
-    // 8. Scoped first, then remaining -- never interleaved.
     let combined: { user: CoreUserProjection; scope: 'SCOPED' | 'UNSCOPED' }[] =
-      [
-        ...scopedUsers.map((user) => ({ user, scope: 'SCOPED' as const })),
-        ...remainingUsers.map((user) => ({ user, scope: 'UNSCOPED' as const })),
-      ];
+      [];
+    let nextCursor: string | null = null;
+
+    if (phase === 'scoped') {
+      const startIdx = scopedCursor
+        ? scopedUsers.findIndex((u) => u.personId === scopedCursor) + 1
+        : 0;
+      const scopedPage = scopedUsers.slice(startIdx, startIdx + limit);
+      combined = scopedPage.map((user) => ({ user, scope: 'SCOPED' as const }));
+
+      if (startIdx + scopedPage.length < scopedUsers.length) {
+        // More scoped users remain -- resume the scoped phase, Core is not
+        // touched at all this call (matches the original design's intent
+        // that scoped results are cheap/local and never re-fetched from
+        // Core on every page).
+        nextCursor = `S:${scopedPage[scopedPage.length - 1]!.personId}`;
+      } else {
+        // Scoped exhausted (or never existed). Fill the rest of THIS page
+        // from Core's "remaining" listing too -- preserves the original
+        // behavior where page 1 shows scoped-then-remaining together in one
+        // response, it just now also works correctly as page 2, 3, ... of a
+        // scoped list that itself spans multiple pages.
+        const budget = limit - combined.length;
+        if (budget > 0) {
+          const remaining = await this.core.listMessagingUsers({
+            limit: Math.min(budget, CORE_LIST_USERS_MAX_LIMIT),
+            excludePersonId: actor.personId,
+          });
+          const remainingUsers = remaining.items.filter(
+            (u) => !scopeIds.has(u.personId),
+          );
+          combined = combined.concat(
+            remainingUsers.map((user) => ({
+              user,
+              scope: 'UNSCOPED' as const,
+            })),
+          );
+          nextCursor = remaining.nextCursor
+            ? `C:${remaining.nextCursor}`
+            : null;
+        } else {
+          // Scoped exactly filled this page -- next call starts the core
+          // phase fresh (empty coreCursor = "from the beginning").
+          nextCursor = 'C:';
+        }
+      }
+    } else {
+      const remaining = await this.core.listMessagingUsers({
+        cursor: coreCursor,
+        limit: Math.min(limit, CORE_LIST_USERS_MAX_LIMIT),
+        excludePersonId: actor.personId,
+      });
+      const remainingUsers = remaining.items.filter(
+        (u) => !scopeIds.has(u.personId),
+      );
+      combined = remainingUsers.map((user) => ({
+        user,
+        scope: 'UNSCOPED' as const,
+      }));
+      // Core's own signal is authoritative here, independent of how many
+      // items survived the scope-overlap filter above -- a filtered-short
+      // page must never be mistaken for "no more data" (this exact
+      // confusion was the root cause being fixed).
+      nextCursor = remaining.nextCursor ? `C:${remaining.nextCursor}` : null;
+    }
 
     // 9. Search (case-insensitive substring over displayName -- Core's own
     // listing endpoint has no server-side search param yet; filtering the
     // already-fetched candidate set is correct and sufficient at this scale,
-    // LLD §48).
+    // LLD §48). Same accepted "search only within what's already fetched"
+    // scope as before -- a caller must still walk pages via nextCursor to
+    // search the full directory, which is exactly what the pagination fix
+    // above now makes possible all the way to the end.
     if (params.search) {
       const needle = params.search.trim().toLowerCase();
       if (needle) {
@@ -92,12 +183,7 @@ export class DirectoryService {
       }
     }
 
-    // 10. Cursor pagination over the combined, ordered set.
-    const page = combined.slice(0, limit);
-    const nextCursor =
-      combined.length > limit
-        ? (page[page.length - 1]?.user.personId ?? null)
-        : null;
+    const page = combined;
 
     // 11. Policy metadata -- messagingMode per item, plus whether a
     // conversation already exists (never auto-created here, LLD §28).

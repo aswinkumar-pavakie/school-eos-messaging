@@ -33,6 +33,6 @@ export class DirectoryController {
       { personId: actor.personId, roles: actor.roles },
       { search: query.search, cursor: query.cursor, limit: query.limit },
     );
-    return { items: result.items, nextCursor: result.nextCursor };
+    return { data: { items: result.items, nextCursor: result.nextCursor } };
   }
 }

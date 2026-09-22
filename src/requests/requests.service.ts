@@ -55,6 +55,9 @@ export interface CreateRequestResult {
   conversationId: string;
   state: 'ACTIVE' | 'PENDING';
   messagingMode: 'DIRECT' | 'REQUEST';
+  // See CreateConversationResult's own comment in conversations.service.ts --
+  // identical reasoning, same describeExisting short-circuit here.
+  isNew: boolean;
 }
 
 @Injectable()
@@ -134,6 +137,7 @@ export class RequestsService {
           conversationId: conversation.id,
           state: 'ACTIVE',
           messagingMode: 'DIRECT',
+          isNew: true,
         };
       }
 
@@ -205,6 +209,7 @@ export class RequestsService {
         conversationId: conversation.id,
         state: 'PENDING',
         messagingMode: 'REQUEST',
+        isNew: true,
       };
     } catch (err) {
       if (isUniqueViolation(err)) {
@@ -354,6 +359,7 @@ export class RequestsService {
       conversationId: conversation.id,
       state: pending ? 'PENDING' : 'ACTIVE',
       messagingMode: pending ? 'REQUEST' : 'DIRECT',
+      isNew: false,
     };
   }
 }

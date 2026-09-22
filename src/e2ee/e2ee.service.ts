@@ -23,8 +23,12 @@ export interface PublishPrekeysInput {
 
 export interface DeviceKeyBundle {
   deviceId: string;
-  identityPublicKey: string;
-  algorithm: string;
+  // Only ever populated for a device that also published to the old,
+  // now-inert X25519 prekey system -- never required. Every real client
+  // only reads mlsKeyPackage below; a device that only ever went through
+  // MLS registration legitimately has neither.
+  identityPublicKey: string | null;
+  algorithm: string | null;
   signedPrekey: { publicKey: string; signature: string } | null;
   oneTimePrekey: string | null;
   mlsKeyPackage: { id: string; data: string } | null;
@@ -166,8 +170,15 @@ export class E2eeService {
 
     const bundles: DeviceKeyBundle[] = [];
     for (const device of devices) {
+      // Legacy X25519 identity key -- present only for a device that also
+      // published to the old prekey system; a revoked one is treated the
+      // same as absent. This is NEVER a reason to skip the device entirely
+      // -- doing so previously hid every real, MLS-only device's
+      // mlsKeyPackage too, since no client has published to this old system
+      // in ages (see DeviceKeyBundle's own comment).
       const identityKey = await this.keysRepo.findIdentityKey(device.id);
-      if (!identityKey || identityKey.revokedAt) continue;
+      const validIdentityKey =
+        identityKey && !identityKey.revokedAt ? identityKey : null;
       const signedPrekey = await this.keysRepo.findActiveSignedPrekey(
         device.id,
       );
@@ -179,8 +190,8 @@ export class E2eeService {
       );
       bundles.push({
         deviceId: device.id,
-        identityPublicKey: identityKey.identityPublicKey,
-        algorithm: identityKey.algorithm,
+        identityPublicKey: validIdentityKey?.identityPublicKey ?? null,
+        algorithm: validIdentityKey?.algorithm ?? null,
         signedPrekey: signedPrekey
           ? {
               publicKey: signedPrekey.publicKey,
