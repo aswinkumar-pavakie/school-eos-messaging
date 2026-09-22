@@ -33,6 +33,26 @@ import {
 const REQUEST_TIMEOUT_MS = 45_000;
 const CACHE_TTL_MS = 5_000;
 
+// A DIFFERENT cold-start failure mode from the one the 45s timeout above
+// covers -- confirmed live via fresh Render logs: while Core's container is
+// still spinning up, Render's own edge proxy in front of it rejects
+// incoming requests with a flat 429 before the request ever reaches the
+// NestJS app (no application-level rate limiter exists anywhere in Core's
+// own codebase -- confirmed by grep). No timeout fixes this, since the
+// request never hangs, it's rejected outright. This is transient and
+// retryable by nature (the container finishes booting within a handful of
+// seconds), so a short bounded retry-with-backoff on 429 (and the other
+// classic "upstream not ready yet" statuses, 502/503/504) is the correct
+// fix -- distinct from a genuine, permanent non-2xx (401/404/etc), which
+// still fails immediately, once, exactly as before.
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const MAX_RETRIES = 4;
+const RETRY_BASE_DELAY_MS = 1_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 interface CacheEntry<T> {
   value: T;
   expiresAt: number;
@@ -177,32 +197,57 @@ export class CoreIntegrationService {
     path: string,
     body?: unknown,
   ): Promise<T> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
-        method,
-        headers: {
-          'X-Internal-Service-Key': this.internalKey,
-          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new HttpException(
-          `Core integration returned ${response.status}`,
-          response.status,
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const response = await fetch(`${this.baseUrl}${path}`, {
+          method,
+          headers: {
+            'X-Internal-Service-Key': this.internalKey,
+            ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          if (RETRYABLE_STATUSES.has(response.status) && attempt < MAX_RETRIES) {
+            const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
+            this.logger.warn(
+              `Core integration call ${method} ${path} got ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES + 1}, likely Core still waking up) — retrying in ${delay}ms`,
+            );
+            await sleep(delay);
+            continue;
+          }
+          throw new HttpException(
+            `Core integration returned ${response.status}`,
+            response.status,
+          );
+        }
+        return (await response.json()) as T;
+      } catch (err) {
+        // AbortError (our own timeout) is retried the same as a retryable
+        // status -- Core mid-wake-up can also just hang past the timeout on
+        // an early attempt, and a hung request is exactly as transient as a
+        // 429/502/503 here.
+        const isAbort = err instanceof Error && err.name === 'AbortError';
+        if (isAbort && attempt < MAX_RETRIES) {
+          const delay = RETRY_BASE_DELAY_MS * 2 ** attempt;
+          this.logger.warn(
+            `Core integration call ${method} ${path} timed out (attempt ${attempt + 1}/${MAX_RETRIES + 1}) — retrying in ${delay}ms`,
+          );
+          await sleep(delay);
+          continue;
+        }
+        this.logger.error(
+          `Core integration call failed: ${method} ${path} — ${err instanceof Error ? err.message : err}`,
         );
+        throw new CoreIntegrationUnavailableError(path, err);
+      } finally {
+        clearTimeout(timeout);
       }
-      return (await response.json()) as T;
-    } catch (err) {
-      this.logger.error(
-        `Core integration call failed: ${method} ${path} — ${err instanceof Error ? err.message : err}`,
-      );
-      throw new CoreIntegrationUnavailableError(path, err);
-    } finally {
-      clearTimeout(timeout);
     }
+    // Unreachable -- the loop above always either returns or throws.
+    throw new CoreIntegrationUnavailableError(path, new Error('retry loop exhausted'));
   }
 }
