@@ -46,7 +46,14 @@ const CACHE_TTL_MS = 5_000;
 // fix -- distinct from a genuine, permanent non-2xx (401/404/etc), which
 // still fails immediately, once, exactly as before.
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
-const MAX_RETRIES = 4;
+// 6 retries at base 1s doubling (1+2+4+8+16+32 = 63s of accumulated backoff)
+// -- comfortably covers this same file's own documented "30-60s to wake"
+// worst case. Verified live: a real end-to-end discovery call against a
+// fully cold backend+messaging pair took 34s and succeeded once this budget
+// was in place; the previous 4-retry/15s-total budget was too tight to
+// reliably survive the documented worst case and could still surface the
+// failure to the end user on a slow wake.
+const MAX_RETRIES = 6;
 const RETRY_BASE_DELAY_MS = 1_000;
 
 function sleep(ms: number): Promise<void> {
