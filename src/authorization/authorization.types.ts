@@ -17,13 +17,28 @@ export interface AuthorizationActor {
  * list to evaluate the ACTOR's own JWT roles, which never round-trips
  * through Core on every single request). A role never listed here defaults
  * to NOT messaging-enabled -- fail-closed, not a broadened permission (LLD
- * §47/§71). */
+ * §47/§71).
+ *
+ * SUPERSEDED: the original LLD narrowly enabled only PARENT/FACULTY/
+ * HOSTEL_WARDEN/PRINCIPAL/VICE_PRINCIPAL. The user's own explicit later
+ * instruction widened this to every real login role EXCEPT CANTEEN_VENDOR,
+ * DRIVER, and BUS_ATTENDANT (device-credential-only logins with no
+ * person-to-person messaging use case) -- keep this list identical to the
+ * backend's own constant, both sides must change together. */
 export const MESSAGING_ENABLED_ROLE_CODES = [
   'PARENT',
   'FACULTY',
   'HOSTEL_WARDEN',
   'PRINCIPAL',
   'VICE_PRINCIPAL',
+  'ADMIN',
+  'CORRESPONDENT',
+  'TRANSPORT_MANAGER',
+  'LIBRARY',
+  'FINANCE',
+  'MEDIA_ROOM',
+  'SPORTS_ADMIN',
+  'COMMUNITY',
 ] as const;
 
 export function isMessagingEnabledRole(roles: string[]): boolean {
